@@ -1,0 +1,31 @@
+# ~/DRONE/.gitignore
+
+# Brankas Rahasia
+# Environment Variables
+.env
+
+# Virtual Environment & Cache Python
+.venv/
+# Python cache
+__pycache__/
+*.pyc
+
+# Log OS
+.DS_Store
+
+# LLM Context
+CONTEXT.md
+USER_PERSONA.md
+
+# Symlinks
+px4_core
+px4_core/
+
+# YOLO Dataset (Heavy Image Files)
+dataset/
+
+# AI Models
+*.pt
+.agents/
+evaluation.md
+EVALUATION_REPORT.md
