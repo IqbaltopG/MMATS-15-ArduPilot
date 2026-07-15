@@ -1,6 +1,10 @@
 # 🚁 MMATS-15 (ArduPilot Edition)
 *Microservice Multisensor Autonomous Targeting System*
 
+> [!WARNING]  
+> **🚨 HIGHLY EXPERIMENTAL - DO NOT FLASH TO HARDWARE YET 🚨**  
+> This ArduPilot branch is currently under heavy development and optimization. The State Machine, YOLO vision integration, and UDP Microservices are tuned explicitly for **Gazebo SITL at 30-40% Real-Time Factor (RTF)**. If you flash this to a physical Jetson/Raspberry Pi and fly it right now, the timeout scalers and pitch-coupling parameters will cause the drone to behave erratically or crash. **USE IN SIMULATION ONLY** until this warning is removed.
+
 ![Python](https://img.shields.io/badge/Python-3.10-blue?style=for-the-badge&logo=python)
 ![PX4](https://img.shields.io/badge/PX4_Autopilot-SITL-blueviolet?style=for-the-badge)
 ![MAVSDK](https://img.shields.io/badge/MAVSDK-Enabled-success?style=for-the-badge)
@@ -32,68 +36,31 @@ __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia __EGL_VENDOR_LIBRAR
 
 ---
 
-## 🐧 Native Linux Setup (Ubuntu 22.04 LTS)
-For you bare-metal dual-booters. Run this. Don't skip steps.
+## 🐧 ArduPilot Setup (Ubuntu 22.04 LTS / WSL2)
+For you bare-metal dual-booters or WSL2 users. Run this. Don't skip steps.
 
-### 1. System Provisioning
-Execute the official PX4 script to yank Gazebo and the ROS/Toolchain dependencies.
-
-```bash
-sudo apt update && sudo apt upgrade -y
-wget https://raw.githubusercontent.com/PX4/PX4-Autopilot/main/Tools/setup/ubuntu.sh
-bash ubuntu.sh
-pip install -r requirements.txt
-```
-⚠️ **System Halt:** Once the script finishes, **YOU MUST REBOOT YOUR PC**. If you don't reboot, don't cry to us when it breaks.
-
-### 2. Clone & Compile Firmware
-```bash
-git clone https://github.com/PX4/PX4-Autopilot.git --recursive
-cd PX4-Autopilot
-make px4_sitl gz_x500
-```
-
----
-
-## 🪟 Windows Setup Guide (via WSL2)
-**DO NOT USE A VM (VirtualBox/VMware).** If you use a VM, your VRAM will bottleneck into oblivion and your framerate will be measured in Seconds Per Frame. Use **WSL2 (Ubuntu 22.04 LTS)**. 
-
-### 1. Dependency Injection
-Open your WSL2 terminal and run:
+### 1. System Provisioning & Environment Setup
+Execute the custom setup script. This configures Gazebo environment variables, GPU rendering bypass, and spawns the drone in the Gazebo world.
 
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install git python3-pip python-is-python3 make -y
-wget https://raw.githubusercontent.com/PX4/PX4-Autopilot/main/Tools/setup/ubuntu.sh
-bash ubuntu.sh
+cd /home/ambatron/DRONE_ARDU
+./setup_ardu.sh
 ```
-⚠️ **System Halt:** **RESTART WSL AFTER THIS FINISHES**. Either close the terminal or run `wsl --shutdown` in Windows CMD. 
+⚠️ **Note:** Wait for Gazebo to fully load the 3D world and spawn the drone before moving to the next step.
 
-### 2. Clone & Compile Firmware
-```bash
-git clone https://github.com/PX4/PX4-Autopilot.git --recursive
-cd PX4-Autopilot
-make px4_sitl gz_x500
-```
-*(If Gazebo launches and the X500 drone spawns, you survived compilation. Kill it with `Ctrl+C`).*
-
----
-
-## 📡 Ground Control Integration (QGC)
-For WSL2 users, the simulation runs inside Linux, but you control it from Windows because WSL GUI performance is a joke.
-
-1. Download **QGroundControl** for Windows from the [Official Site](https://docs.qgroundcontrol.com/).
-2. **Network Bypass:** When Windows Defender pops up, allow **Private & Public Networks**. If you misclick this, QGC will be completely blind and drop all MAVLink packets. 
-3. Run `make px4_sitl gz_x500` in WSL. Open QGC on Windows. It will auto-connect.
+### 2. Connect Ground Control Integration (QGC)
+1. Download **QGroundControl** for Windows/Linux from the [Official Site](https://docs.qgroundcontrol.com/).
+2. **Network Bypass:** Allow **Private & Public Networks** in Firewall. If you misclick this, QGC will be completely blind.
+3. Keep QGC open in the background. It will auto-connect once MAVProxy starts.
 
 ---
 
 ## ⚠️ Rules of Engagement (READ BEFORE ASKING STUPID QUESTIONS)
 Before you dump a stack trace in the group chat, use your brain:
 
-1. **"My Gazebo screen is black / UI is glitching!"** -> Update your GPU drivers. WSLg renders directly through the Host GPU driver. 
-2. **"QGC won't connect!"** -> Fix your Windows Firewall. 99% of you blocked the UDP packets.
-3. **"Make failed during compile!"** -> Scroll up and find the first RED text. Don't just read "Failed" at the very bottom like an idiot. Read the actual error log.
+1. **"My Gazebo screen is black / UI is glitching!"** -> Update your GPU drivers. Ensure `__NV_PRIME_RENDER_OFFLOAD=1` is set if using hybrid graphics.
+2. **"QGC won't connect!"** -> Fix your Firewall. 99% of you blocked the UDP packets.
+3. **"ArduCopter won't arm!"** -> Wait for the EKF to become healthy. It takes ~15 seconds after launch.
 
 > **RTFM (Read The Fucking Manual):** These instructions are tested. Execute them exactly as written.
 
@@ -102,14 +69,27 @@ Before you dump a stack trace in the group chat, use your brain:
 ## ⚡ HOW TO RUN (THE ANTI-BLOATWARE WAY)
 Forget the ritual of opening a dozen terminals or compiling a massive ROS workspace that takes 10 minutes. MMATS-15 is built for speed.
 
-1. Ensure you are inside the `DRONE` directory and the Simulator (SITL) is already running in the background.
-2. Ignite the circuit by executing the All-in-One Python launcher:
-   ```bash
-   python3 maruk_launcher.py
-   ```
-3. You're done. This script automatically spawns child processes to run `vision_daemon.py` (Camera/AI) and `autopilot.py` (State Machine) in parallel. The drone will instantly Arm, Take-Off, and begin hunting targets.
+**Terminal 1 (The Matrix - Physics Engine):**
+Start Gazebo Harmonic with the KRTI 2026 Arena.
+```bash
+./run_gazebo.sh
+```
+*(Wait until the UI loads and you see the blue landing pad).*
 
-> **⚠️ NOTE (WIP):** The `maruk_launcher.py` script is currently in development. The stdout logs from both the Vision Daemon and Autopilot will overlap in the same terminal. Ignore the visual mess; we did this purely for efficiency so you don't have to manually orchestrate 3 separate terminal windows. 
+**Terminal 2 (The Brain - Flight Controller):**
+Start ArduCopter SITL (JSON mode) and MAVProxy. This connects Gazebo to the flight controller and forces GUIDED mode.
+```bash
+./run_ardu.sh
+```
+
+**Terminal 3 (The Assassin - Logic & Vision):**
+Ignite the circuit by executing the Python logic.
+```bash
+python3 autopilot.py
+```
+*(Or use `python3 maruk_launcher.py` if you want to spawn both vision and autopilot in parallel).*
+
+> **⚠️ NOTE:** `autopilot.py` will continuously attempt to arm the drone until the EKF (Extended Kalman Filter) is healthy. Once healthy, it auto-arms, takes off, and executes the state machine.
 > 
 > However, it's completely up to you. You can either use the launcher for a fast deployment, or you can manually run `vision_daemon.py` and `autopilot.py` in separate terminals to treat them as clean, isolated microservices.
 
