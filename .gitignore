@@ -29,3 +29,13 @@ dataset/
 .agents/
 evaluation.md
 EVALUATION_REPORT.md
+ARDUPILOT_MIGRATION_NOTES.md
+
+# ArduPilot / MAVProxy Logs
+logs/
+terrain/
+*.BIN
+*.tlog*
+eeprom.bin
+mav.parm
+mavinit.scr

@@ -6,7 +6,7 @@ from utils import clamp, calculate_distance, get_stutter_creep_speed
 
 class MissionContext:
     def __init__(self):
-        self.state_phase = "BLIND_PUNCH_TAKEOFF"
+        self.state_phase = "CENTERING_GATE_1"
         self.timeout_counter = 0
         self.has_seen_target = False
         self.last_front_err_x = 0
@@ -23,11 +23,11 @@ class MissionContext:
         self.dist_flown = 0.0
 
 class BaseState:
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         pass
 
 class BlindPunch_Takeoff(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         if ctx.timeout_counter == 0:
             ctx.blind_start_x = state.x
             ctx.blind_start_y = state.y
@@ -40,13 +40,13 @@ class BlindPunch_Takeoff(BaseState):
             ctx.timeout_counter = 0
             ctx.state_phase = "CENTERING_GATE_1"
         else:
-            await flight.send_body_velocity(drone, forward_m_s=1.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=0.0)
+            await flight.send_body_velocity(master, forward_m_s=1.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=0.0)
 
 class GateCenteringBase(BaseState):
     def __init__(self, next_phase, punch_dist=3.2):
         self.next_phase = next_phase
         self.punch_dist = punch_dist
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -60,6 +60,10 @@ class GateCenteringBase(BaseState):
         down_class = state.target_down.get("class", "none")
         down_err_x = state.target_down.get("error_x", 0)
         down_err_y = state.target_down.get("error_y", 0)
+        
+        # DEBUG LOG UNTUK MENCARI TAHU KENAPA STATE MACHINE BUTA
+        if ctx.state_phase == "CENTERING_GATE_1":
+            print(f"[DEBUG STATE] phase={ctx.state_phase} | front_status={front_status} | front_class='{front_class}'")
 
         # Active Altitude Hold for 1.5m Operating Height
         z_err_15 = -1.5 - state.z
@@ -89,8 +93,8 @@ class GateCenteringBase(BaseState):
                     up_cmd = clamp(up_cmd, -0.6, 0.6)
                     fwd_cmd = 0.0 # Berhenti maju buat nunggu stabil (anti-banteng)
                     
-                    # Tolerance dilebarkan sedikit (30 pixel) biar ga nyangkut infinite loop
-                    if abs(front_err_x) < 30 and abs(front_err_y + 150) < 30:
+                    # Tolerance dilebarkan (80 pixel) untuk ArduPilot OakD-Lite FOV
+                    if abs(front_err_x) < 80 and abs(front_err_y + 150) < 80:
                         ctx.altitude_locked = True
                         print("[AUTOPILOT] [GATE] Centered! ALTITUDE LOCKED. Going Pitbull...")
                 else:
@@ -112,11 +116,11 @@ class GateCenteringBase(BaseState):
                     
                 print(f"[AUTOPILOT] [GATE] Centering (Area: {front_area}). Strafe: {strafe_cmd:.2f}, Z: {up_cmd:.2f}, Lock: {ctx.altitude_locked}")
 
-            await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
+            await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
         else:
             if ctx.has_seen_target:
                 # Syarat blind-punch: Harus udah deket banget (Area gede) atau bener-bener di tengah sebelum hilang
-                if (ctx.last_front_err_y < 20 and abs(ctx.last_front_err_x) < 30 and ctx.last_front_area > 20000) or ctx.last_front_area > 150000 or ctx.timeout_counter > 0:
+                if (ctx.last_front_err_y < 20 and abs(ctx.last_front_err_x) < 80 and ctx.last_front_area > 20000) or ctx.last_front_area > 100000 or ctx.timeout_counter > 0:
                     if ctx.timeout_counter == 0:
                         ctx.blind_start_x = state.x
                         ctx.blind_start_y = state.y
@@ -132,14 +136,14 @@ class GateCenteringBase(BaseState):
                 z_err = -1.5 - state.z
                 up_cmd = clamp(z_err * 0.5, -0.5, 0.5)
                 fwd_creep = 0.4 if not getattr(ctx, 'has_seen_target', False) else 0.0
-                await flight.send_body_velocity(drone, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=up_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=up_cmd, yaw_deg_s=0.0)
             elif ctx.dist_flown < self.punch_dist: # PUNCH THROUGH INS
                 z_err = -0.8 - state.z
                 up_cmd = clamp(z_err * 0.5, -0.5, 0.5)
                 
                 if ctx.timeout_counter % 10 == 0:
                     print(f"[AUTOPILOT] [GATE] Punching blind! INS Jarak: {ctx.dist_flown:.2f}/{self.punch_dist:.1f}m, Z: {up_cmd:.2f}")
-                await flight.send_body_velocity(drone, forward_m_s=0.8, right_m_s=0.0, down_m_s=up_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.8, right_m_s=0.0, down_m_s=up_cmd, yaw_deg_s=0.0)
             else:
                 print(f"[AUTOPILOT] Lolos Gate (Jarak INS: {ctx.dist_flown:.2f}m)! Transisi ke Phase selanjutnya...")
                 ctx.state_phase = self.next_phase
@@ -166,7 +170,7 @@ class TerminalGuidance_FinalGate(GateCenteringBase):
         super().__init__("FIND_LANDING_PAD", punch_dist=3.2)
 
 class AcquireTarget_Aruco1(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -207,9 +211,9 @@ class AcquireTarget_Aruco1(BaseState):
                 
                 if abs(front_err_x) > 40:
                     # Target off-center! Hover and rotate to face it before pushing forward.
-                    await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
                 else:
-                    await flight.send_body_velocity(drone, forward_m_s=0.5, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.5, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
             elif ctx.has_seen_target:
                 # FALLBACK MEMORY: Masuk blind spot antara kamera depan dan bawah
                 ctx.dist_flown = math.sqrt((state.x - ctx.blind_start_x)**2 + (state.y - ctx.blind_start_y)**2)
@@ -220,20 +224,20 @@ class AcquireTarget_Aruco1(BaseState):
                     
                 if ctx.timeout_counter >= 500:
                     print(f"[AUTOPILOT] Kebablasan ArUco 1 di blind spot! Terbang mundur...")
-                    await flight.send_body_velocity(drone, forward_m_s=-0.3, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                    await flight.send_body_velocity(master, forward_m_s=-0.3, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
                 else:
                     # Stutter creep to level pitch and scan straight down
                     fwd_creep = 0.3 if ctx.timeout_counter % 20 < 10 else 0.0
-                    await flight.send_body_velocity(drone, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                    await flight.send_body_velocity(master, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
             else:
-                await flight.send_body_velocity(drone, forward_m_s=0.5, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.5, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
 
     # ---------------------------------------------------------
     # PHASE 3B: CENTER_ARUCO_1 (Precision Hover)
     # ---------------------------------------------------------
 
 class TerminalGuidance_Aruco1(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -268,7 +272,7 @@ class TerminalGuidance_Aruco1(BaseState):
             fwd_cmd = clamp(fwd_cmd, -0.2, 0.2)
             strafe_cmd = clamp(strafe_cmd, -0.2, 0.2)
             
-            await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=0.0, yaw_deg_s=0.0)
+            await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=0.0, yaw_deg_s=0.0)
             
             if abs(down_err_x) < 80 and abs(down_err_y) < 80:
                 ctx.timeout_counter += 1
@@ -296,16 +300,16 @@ class TerminalGuidance_Aruco1(BaseState):
                 # FALLBACK MEMORY: Teruskan terbang ke memori koordinat terakhir pas lagi flicker
                 fwd_cmd = clamp(-ctx.last_down_err_y * 0.0015, -0.2, 0.2)
                 strafe_cmd = clamp(ctx.last_down_err_x * 0.0015, -0.2, 0.2)
-                await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
             else:
-                await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
 
     # ---------------------------------------------------------
     # PHASE 4: FOLLOW_LINE_TO_WP2 (Murni Ngikutin Garis)
     # ---------------------------------------------------------
 
 class FlyByWire_LineFollow(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -368,14 +372,14 @@ class FlyByWire_LineFollow(BaseState):
             ctx.timeout_counter = 0
             ctx.has_seen_target = False
         
-        await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=global_climb_cmd, yaw_deg_s=yaw_cmd)
+        await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=global_climb_cmd, yaw_deg_s=yaw_cmd)
 
     # ---------------------------------------------------------
     # PHASE 4A: FIND_ARUCO_2 (Mencari Aruco setelah garis habis)
     # ---------------------------------------------------------
 
 class AcquireTarget_Aruco2(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -412,9 +416,9 @@ class AcquireTarget_Aruco2(BaseState):
                 yaw_cmd = front_err_x * ctx.kp_yaw
                 
                 if abs(front_err_x) > 40:
-                    await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=yaw_cmd)
                 else:
-                    await flight.send_body_velocity(drone, forward_m_s=0.5, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.5, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=yaw_cmd)
             elif ctx.has_seen_target:
                 # FALLBACK MEMORY: Blind spot creep
                 ctx.dist_flown = math.sqrt((state.x - ctx.blind_start_x)**2 + (state.y - ctx.blind_start_y)**2)
@@ -425,20 +429,20 @@ class AcquireTarget_Aruco2(BaseState):
                     
                 if ctx.timeout_counter >= 500:
                     print(f"[AUTOPILOT] Kebablasan ArUco 2 di blind spot! Terbang mundur...")
-                    await flight.send_body_velocity(drone, forward_m_s=-0.3, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
+                    await flight.send_body_velocity(master, forward_m_s=-0.3, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
                 else:
                     # Stutter creep to level pitch and scan straight down
                     fwd_creep = 0.3 if ctx.timeout_counter % 20 < 10 else 0.0
-                    await flight.send_body_velocity(drone, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
+                    await flight.send_body_velocity(master, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
             else:
-                await flight.send_body_velocity(drone, forward_m_s=0.5, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.5, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
 
     # ---------------------------------------------------------
     # PHASE 4B: CENTER_ARUCO_2 (Precision Hover)
     # ---------------------------------------------------------
 
 class TerminalGuidance_Aruco2(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -471,7 +475,7 @@ class TerminalGuidance_Aruco2(BaseState):
             fwd_cmd = clamp(fwd_cmd, -0.2, 0.2)
             strafe_cmd = clamp(strafe_cmd, -0.2, 0.2)
             
-            await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
+            await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
             
             if abs(down_err_x) < 80 and abs(down_err_y) < 80:
                 ctx.timeout_counter += 1
@@ -500,16 +504,16 @@ class TerminalGuidance_Aruco2(BaseState):
                 # FALLBACK MEMORY: Rebound brake
                 fwd_cmd = clamp(-ctx.last_down_err_y * 0.0015, -0.2, 0.2)
                 strafe_cmd = clamp(ctx.last_down_err_x * 0.0015, -0.2, 0.2)
-                await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
             else:
-                await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=0.0)
 
     # ---------------------------------------------------------
     # PHASE 4C: YAW_LEFT_TRIPLE_1 (Belok Kiri Nyari Triple Gate)
     # ---------------------------------------------------------
 
 class ExecuteYawSweep_FinalLine(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         down_status = state.target_down.get("status", "LOST")
@@ -519,7 +523,7 @@ class ExecuteYawSweep_FinalLine(BaseState):
         global_climb_cmd = clamp(z_err_15 * 0.5, -0.5, 0.5)
 
         ctx.timeout_counter += 1
-        await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=25.0)
+        await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=global_climb_cmd, yaw_deg_s=25.0)
         
         if (front_status == "LOCKED" and front_class == "Straight Line") or (down_status == "LOCKED" and down_class == "Straight Line"):
             print(f"[AUTOPILOT] Straight Line Final terlihat! Memulai Line Follow...")
@@ -527,7 +531,7 @@ class ExecuteYawSweep_FinalLine(BaseState):
             ctx.timeout_counter = 0
 
 class ExecuteYawSweep_Left(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -550,7 +554,7 @@ class ExecuteYawSweep_Left(BaseState):
         # PHASE 2: CENTERING_GATE_1 (Maju nembus gawang pertama)
         # ---------------------------------------------------------
         ctx.timeout_counter += 1
-        await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=-15.0)
+        await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=-15.0)
         if front_status == "LOCKED" and front_class == "Tripple Gate" and front_area > 10000:
             print(f"[AUTOPILOT] Triple Gate terlihat (Area: {front_area})! Memulai approach...")
             ctx.state_phase = "FIND_TRIPLE_GATE_1"
@@ -561,7 +565,7 @@ class ExecuteYawSweep_Left(BaseState):
     # ---------------------------------------------------------
 
 class AcquireTarget_TripleGate1(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -606,7 +610,7 @@ class AcquireTarget_TripleGate1(BaseState):
                 
             ctx.timeout_counter = 0
             print(f"[AUTOPILOT] [TRIPLE GATE 2] Centering (Area: {front_area}). Fwd: {fwd_cmd}, Yaw: {yaw_cmd:.2f}, Z: {up_cmd:.2f}")
-            await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=0.0, down_m_s=up_cmd, yaw_deg_s=yaw_cmd)
+            await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=0.0, down_m_s=up_cmd, yaw_deg_s=yaw_cmd)
         else:
             if ctx.has_seen_target:
                 ctx.timeout_counter += 1
@@ -623,10 +627,10 @@ class AcquireTarget_TripleGate1(BaseState):
             # Hover in place while rotating to find the gate
             mem_yaw = getattr(ctx, 'last_front_err_x', 0) * ctx.kp_yaw
             mem_yaw = clamp(mem_yaw, -15.0, 15.0)
-            await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=mem_yaw)
+            await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=mem_yaw)
 
 class DeadReckoning_TripleGate1(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -657,7 +661,7 @@ class DeadReckoning_TripleGate1(BaseState):
             up_cmd = clamp(z_err * 0.5, -0.5, 0.5)
             
             print(f"[AUTOPILOT] [TRIPLE GATE 2] Blind Punch INS! Jarak: {ctx.dist_flown:.2f}/7.0m, Lidar: {strafe_cmd:.2f}")
-            await flight.send_body_velocity(drone, forward_m_s=0.8, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
+            await flight.send_body_velocity(master, forward_m_s=0.8, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
         else:
             print("[AUTOPILOT] Lolos Triple Gate 2! Mencari WP2 (Aruco 2)...")
             ctx.state_phase = "FIND_ARUCO_2"
@@ -669,7 +673,7 @@ class DeadReckoning_TripleGate1(BaseState):
     # ---------------------------------------------------------
 
 class AcquireTarget_DropBox(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -712,9 +716,9 @@ class AcquireTarget_DropBox(BaseState):
                 yaw_cmd = front_err_x * ctx.kp_yaw
                 
                 if abs(front_err_x) > 40:
-                    await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
                 else:
-                    await flight.send_body_velocity(drone, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
             elif ctx.has_seen_target:
                 # FALLBACK MEMORY: Masuk blind spot antara kamera depan dan bawah. Creep pelan pakai memori yaw.
                 ctx.dist_flown = math.sqrt((state.x - ctx.blind_start_x)**2 + (state.y - ctx.blind_start_y)**2)
@@ -729,24 +733,24 @@ class AcquireTarget_DropBox(BaseState):
                     reverse_dist = math.sqrt((state.x - getattr(ctx, 'reverse_start_x', state.x))**2 + (state.y - getattr(ctx, 'reverse_start_y', state.y))**2)
                     if reverse_dist > 2.0:
                         print("[AUTOPILOT] Mundur kejauhan, Hover nunggu instruksi!")
-                        await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                        await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
                     else:
                         print(f"[AUTOPILOT] Kebablasan Drop Box di blind spot! Terbang mundur...")
-                        await flight.send_body_velocity(drone, forward_m_s=-0.3, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                        await flight.send_body_velocity(master, forward_m_s=-0.3, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
                 else:
                     # Stutter creep to level pitch and scan straight down
                     fwd_creep = 0.3 if ctx.timeout_counter % 20 < 10 else 0.0
-                    await flight.send_body_velocity(drone, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                    await flight.send_body_velocity(master, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
             else:
                 # Belum keliatan, jalan lurus pelan sambil nanjak ke ketinggian operasi
-                await flight.send_body_velocity(drone, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
                 
     # ---------------------------------------------------------
     # PHASE 6.5: CENTER_DROPBOX (Mensejajarkan Drone dengan Drop Box)
     # ---------------------------------------------------------
 
 class TerminalGuidance_DropBox(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -788,9 +792,9 @@ class TerminalGuidance_DropBox(BaseState):
             up_cmd = clamp(z_err * 0.5, -0.5, 0.5)
             
             print(f"[AUTOPILOT] [DROP BOX] Centering (X:{down_err_x}, Y:{down_err_y}). Fwd:{fwd_cmd:.2f}, Strafe:{strafe_cmd:.2f}, Z:{up_cmd:.2f}")
-            await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
+            await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
             
-            if abs(down_err_x) < 20 and abs(down_err_y) < 20:
+            if abs(down_err_x) < 80 and abs(down_err_y) < 80:
                 if down_class in ["Red Drop Box", "RedDrop Box", "Aruco", "Aruco Area"]:
                     ctx.timeout_counter += 1
                     if ctx.timeout_counter > 100:
@@ -829,16 +833,16 @@ class TerminalGuidance_DropBox(BaseState):
                 z_err = -1.5 - state.z
                 up_cmd = clamp(z_err * 0.5, -0.5, 0.5)
                 print(f"[AUTOPILOT] Drop Box Flicker! Balik ke kordinat memori... Fwd: {fwd_cmd:.2f}")
-                await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
             else:
-                await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=0.0)
 
     # ---------------------------------------------------------
     # PHASE 7: YAW_RIGHT_TRIPLE_2 (Yaw Kanan ke Triple Gate 1)
     # ---------------------------------------------------------
 
 class ExecuteYawSweep_Right(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -870,11 +874,11 @@ class ExecuteYawSweep_Right(BaseState):
             yaw_diff = 360 - yaw_diff
 
         ctx.timeout_counter += 1
-        await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=30.0)
+        await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=30.0)
         
-        # HACK: Jangan lock gawang pertama (misi3) yang ada di -108 derajat. 
-        # Tunggu muter minimal 120 derajat baru boleh lock gawang misi2!
-        if front_status == "LOCKED" and front_class == "Tripple Gate" and front_area > 10000 and yaw_diff > 120:
+        # HACK: Jangan lock gawang pertama (misi3). 
+        # Tunggu muter minimal 90 derajat baru boleh lock gawang misi2!
+        if front_status == "LOCKED" and front_class == "Tripple Gate" and front_area > 15000 and yaw_diff > 90:
             print(f"[AUTOPILOT] Triple Gate 1 (Double Gate) terlihat (Area: {front_area}, YawDiff: {yaw_diff:.1f})! Memulai approach...")
             ctx.state_phase = "TRIPLE_GATE_2"
             ctx.timeout_counter = 0
@@ -885,7 +889,7 @@ class ExecuteYawSweep_Right(BaseState):
     # ---------------------------------------------------------
 
 class AcquireTarget_TripleGate2(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -929,7 +933,7 @@ class AcquireTarget_TripleGate2(BaseState):
                     
             ctx.timeout_counter = 0
             print(f"[AUTOPILOT] [TRIPLE GATE 1] Centering (Area: {front_area}). Fwd: {fwd_cmd}, Yaw: {yaw_cmd:.2f}, Z: {up_cmd:.2f}")
-            await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=0.0, down_m_s=up_cmd, yaw_deg_s=yaw_cmd)
+            await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=0.0, down_m_s=up_cmd, yaw_deg_s=yaw_cmd)
         else:
             if ctx.has_seen_target:
                 ctx.timeout_counter += 1
@@ -946,10 +950,10 @@ class AcquireTarget_TripleGate2(BaseState):
             # Hover in place while rotating to find the gate
             mem_yaw = getattr(ctx, 'last_front_err_x', 0) * ctx.kp_yaw
             mem_yaw = clamp(mem_yaw, -15.0, 15.0)
-            await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=mem_yaw)
+            await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=mem_yaw)
 
 class DeadReckoning_TripleGate2(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -980,7 +984,7 @@ class DeadReckoning_TripleGate2(BaseState):
             up_cmd = clamp(z_err * 0.5, -0.5, 0.5)
             
             print(f"[AUTOPILOT] [TRIPLE GATE 1] Blind Punch INS! Jarak: {ctx.dist_flown:.2f}/7.0m, Lidar: {strafe_cmd:.2f}")
-            await flight.send_body_velocity(drone, forward_m_s=0.8, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
+            await flight.send_body_velocity(master, forward_m_s=0.8, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
         else:
             print("[AUTOPILOT] Lolos Triple Gate 1! Mencari Red Drop Box (dan Aruco)...")
             ctx.state_phase = "FIND_DROPBOX"
@@ -992,7 +996,7 @@ class DeadReckoning_TripleGate2(BaseState):
     # ---------------------------------------------------------
 
 class AcquireTarget_Aruco3(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -1031,9 +1035,9 @@ class AcquireTarget_Aruco3(BaseState):
                 yaw_cmd = front_err_x * ctx.kp_yaw
                 
                 if abs(front_err_x) > 40:
-                    await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
                 else:
-                    await flight.send_body_velocity(drone, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
             elif ctx.has_seen_target:
                 ctx.dist_flown = math.sqrt((state.x - ctx.blind_start_x)**2 + (state.y - ctx.blind_start_y)**2)
                 ctx.timeout_counter += 1
@@ -1047,22 +1051,22 @@ class AcquireTarget_Aruco3(BaseState):
                     reverse_dist = math.sqrt((state.x - getattr(ctx, 'reverse_start_x', state.x))**2 + (state.y - getattr(ctx, 'reverse_start_y', state.y))**2)
                     if reverse_dist > 2.0:
                         print("[AUTOPILOT] Mundur kejauhan WP3, Hover nunggu instruksi!")
-                        await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                        await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
                     else:
                         print(f"[AUTOPILOT] Kebablasan WP3 di blind spot! Terbang mundur...")
-                        await flight.send_body_velocity(drone, forward_m_s=-0.3, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                        await flight.send_body_velocity(master, forward_m_s=-0.3, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
                 else:
                     fwd_creep = 0.3 if ctx.timeout_counter % 20 < 10 else 0.0
-                    await flight.send_body_velocity(drone, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                    await flight.send_body_velocity(master, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
             else:
-                await flight.send_body_velocity(drone, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
 
     # ---------------------------------------------------------
     # PHASE 9.5: CENTER_ARUCO_3 (Mensejajarkan Drone dengan WP3)
     # ---------------------------------------------------------
 
 class TerminalGuidance_Aruco3(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -1096,9 +1100,9 @@ class TerminalGuidance_Aruco3(BaseState):
             z_err = -1.5 - state.z
             up_cmd = clamp(z_err * 0.5, -0.5, 0.5)
             
-            await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
+            await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
             
-            if abs(down_err_x) < 20 and abs(down_err_y) < 20:
+            if abs(down_err_x) < 80 and abs(down_err_y) < 80:
                 ctx.timeout_counter += 1
                 completion_threshold = 50 if down_class == "Aruco" else 150
                 if ctx.timeout_counter > completion_threshold:
@@ -1122,14 +1126,14 @@ class TerminalGuidance_Aruco3(BaseState):
                 strafe_cmd = clamp(ctx.last_down_err_x * 0.0015, -0.2, 0.2)
                 z_err = -1.5 - state.z
                 up_cmd = clamp(z_err * 0.5, -0.5, 0.5)
-                await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=up_cmd, yaw_deg_s=0.0)
 
     # ---------------------------------------------------------
     # PHASE 10: TURN_ARUCO_3 (Belok Kiri 90 derajat)
     # ---------------------------------------------------------
 
 class ExecuteYawSweep_Aruco3(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -1153,7 +1157,7 @@ class ExecuteYawSweep_Aruco3(BaseState):
         # ---------------------------------------------------------
         ctx.timeout_counter += 1
         # Belok kiri (yaw_deg_s negatif)
-        await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=-30.0)
+        await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.0, yaw_deg_s=-30.0)
         
         # Kunci Matematis: Area filter > 12000 to ensure we lock the CLOSEST gate (Final Gate 1), not Final Gate 2 in the background.
         if front_status == "LOCKED" and front_class == "Single Gate" and front_area > 12000 and front_err_x < 0:
@@ -1171,7 +1175,7 @@ class ExecuteYawSweep_Aruco3(BaseState):
     # ---------------------------------------------------------
 
 class AcquireTarget_LandingPad(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -1213,9 +1217,9 @@ class AcquireTarget_LandingPad(BaseState):
                 yaw_cmd = front_err_x * ctx.kp_yaw
                 
                 if abs(front_err_x) > 40:
-                    await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
                 else:
-                    await flight.send_body_velocity(drone, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
+                    await flight.send_body_velocity(master, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=yaw_cmd)
             elif ctx.has_seen_target:
                 # FALLBACK MEMORY: Blind spot creep
                 ctx.dist_flown = math.sqrt((state.x - ctx.blind_start_x)**2 + (state.y - ctx.blind_start_y)**2)
@@ -1230,23 +1234,23 @@ class AcquireTarget_LandingPad(BaseState):
                     reverse_dist = math.sqrt((state.x - getattr(ctx, 'reverse_start_x', state.x))**2 + (state.y - getattr(ctx, 'reverse_start_y', state.y))**2)
                     if reverse_dist > 2.0:
                         print("[AUTOPILOT] Mundur kejauhan Landing Pad, Hover nunggu instruksi!")
-                        await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                        await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
                     else:
                         print(f"[AUTOPILOT] Kebablasan Landing Pad di blind spot! Terbang mundur...")
-                        await flight.send_body_velocity(drone, forward_m_s=-0.3, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                        await flight.send_body_velocity(master, forward_m_s=-0.3, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
                 else:
                     # Stutter creep to level pitch and scan straight down
                     fwd_creep = 0.3 if ctx.timeout_counter % 20 < 10 else 0.0
-                    await flight.send_body_velocity(drone, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                    await flight.send_body_velocity(master, forward_m_s=fwd_creep, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
             else:
-                await flight.send_body_velocity(drone, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.6, right_m_s=0.0, down_m_s=climb_cmd, yaw_deg_s=0.0)
 
     # ---------------------------------------------------------
     # PHASE 10: PRECISION_LANDING (Turun pelan sambil centering)
     # ---------------------------------------------------------
 
 class TerminalDescent_Landing(BaseState):
-    async def execute(self, drone, ctx):
+    async def execute(self, master, ctx):
         front_status = state.target_front.get("status", "LOST")
         front_class = state.target_front.get("class", "none")
         front_err_x = state.target_front.get("error_x", 0)
@@ -1283,13 +1287,13 @@ class TerminalDescent_Landing(BaseState):
             
             print(f"[AUTOPILOT] [LANDING] Fwd: {fwd_cmd:.2f}, Strafe: {strafe_cmd:.2f}, Stable: {ctx.landing_ticks}/30, Z: {state.z:.2f}")
             # Turun pelan-pelan (0.3 m/s) sambil centering
-            await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=0.3, yaw_deg_s=0.0)
+            await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=0.3, yaw_deg_s=0.0)
             
             if abs(down_err_x) < 80 and abs(down_err_y) < 80:
                 ctx.landing_ticks += 1
                 if ctx.landing_ticks > 30: # Stabil 3 detik nyata (cukup, keburu buta kalau kelamaan)
                     print("[AUTOPILOT] Mendarat sempurna di titik tengah!")
-                    await drone.action.land()
+                    await flight.land(master)
                     print("[AUTOPILOT] Menunggu 8 detik buat pendaratan fisik sebelum Auto-Reset...")
                     await asyncio.sleep(8)
                     # import os
@@ -1303,7 +1307,7 @@ class TerminalDescent_Landing(BaseState):
             # FORCE LAND: Kalau udah terlalu rendah, kamera bawah pasti buta. Paksa mendarat!
             if state.z > -0.4 and ctx.has_seen_target:
                 print(f"[AUTOPILOT] Ketinggian kritis ({state.z:.2f}m)! Kamera bawah buta. FORCE LANDING!")
-                await drone.action.land()
+                await flight.land(master)
                 print("[AUTOPILOT] Menunggu 8 detik buat pendaratan fisik sebelum Auto-Reset...")
                 await asyncio.sleep(8)
                 # import os
@@ -1322,9 +1326,9 @@ class TerminalDescent_Landing(BaseState):
                 fwd_cmd = clamp(-ctx.last_down_err_y * 0.0015, -0.2, 0.2)
                 strafe_cmd = clamp(ctx.last_down_err_x * 0.0015, -0.2, 0.2)
                 print(f"[AUTOPILOT] Landing Pad Flicker! Terbang balik pake memori... Fwd: {fwd_cmd:.2f}, Z: {state.z:.2f}")
-                await flight.send_body_velocity(drone, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=0.3, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=fwd_cmd, right_m_s=strafe_cmd, down_m_s=0.3, yaw_deg_s=0.0)
             else:
-                await flight.send_body_velocity(drone, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.5, yaw_deg_s=0.0)
+                await flight.send_body_velocity(master, forward_m_s=0.0, right_m_s=0.0, down_m_s=0.5, yaw_deg_s=0.0)
 
 
 STATE_REGISTRY = {

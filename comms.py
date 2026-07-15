@@ -1,5 +1,7 @@
 import asyncio
 import json
+from pymavlink import mavutil
+import math
 
 class DroneState:
     def __init__(self):
@@ -14,15 +16,49 @@ class DroneState:
 
 state = DroneState()
 
-async def telemetry_task(drone):
-    async for pos_vel in drone.telemetry.position_velocity_ned():
-        state.x = pos_vel.position.north_m
-        state.y = pos_vel.position.east_m
-        state.z = pos_vel.position.down_m
+async def mavlink_router_task(master):
+    guided_achieved = False
+    last_heartbeat_time = 0
+    
+    while True:
+        current_time = asyncio.get_event_loop().time()
+        
+        # Kirim detak jantung (HEARTBEAT) tiap 1 detik biar ArduPilot nggak ngira kita mati!
+        if current_time - last_heartbeat_time > 1.0:
+            master.mav.heartbeat_send(
+                mavutil.mavlink.MAV_TYPE_GCS,
+                mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                0, 0, 0
+            )
+            last_heartbeat_time = current_time
 
-async def attitude_task(drone):
-    async for attitude in drone.telemetry.attitude_euler():
-        state.yaw = attitude.yaw_deg
+        # Kuras semua antrean pesan biar realtime!
+        while True:
+            # Baca APAPUN pesannya tanpa filter type!
+            msg = master.recv_match(blocking=False)
+            if not msg:
+                break # Antrean kosong
+                
+            msg_type = msg.get_type()
+            
+            if msg_type == 'LOCAL_POSITION_NED':
+                state.x = msg.x
+                state.y = msg.y
+                state.z = msg.z
+            elif msg_type == 'ATTITUDE':
+                state.yaw = math.degrees(msg.yaw)
+            elif msg_type == 'HEARTBEAT':
+                # Jangan kill switch kalau yang dibaca HEARTBEAT dari diri sendiri/MAVProxy
+                mode = mavutil.mode_string_v10(msg)
+                if mode == 'GUIDED':
+                    guided_achieved = True
+                elif guided_achieved and mode and mode != 'GUIDED' and mode != 'STABILIZE':
+                    # Pengecualian buat STABILIZE karena kita pakai buat hack Takeoff
+                    print(f"[KILL SWITCH] MANUAL OVERRIDE DETECTED! (Flight Mode changed to {mode}). Exiting Autopilot...")
+                    import os
+                    os._exit(0)
+                    
+        await asyncio.sleep(0.01)
 
 class UDPReceiverProtocol(asyncio.DatagramProtocol):
     def datagram_received(self, data, addr):
@@ -47,6 +83,7 @@ async def start_udp_server(ip="127.0.0.1", port=5005):
     loop = asyncio.get_running_loop()
     transport, protocol = await loop.create_datagram_endpoint(
         lambda: UDPReceiverProtocol(),
-        local_addr=(ip, port)
+        local_addr=(ip, port),
+        reuse_port=True
     )
     return transport

@@ -1,4 +1,5 @@
-# 🚁 MMATS-15: Microservice Multisensor Autonomous Targetting System
+# 🚁 MMATS-15 (ArduPilot Edition)
+*Microservice Multisensor Autonomous Targeting System*
 
 ![Python](https://img.shields.io/badge/Python-3.10-blue?style=for-the-badge&logo=python)
 ![PX4](https://img.shields.io/badge/PX4_Autopilot-SITL-blueviolet?style=for-the-badge)

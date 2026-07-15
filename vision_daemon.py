@@ -6,6 +6,7 @@ import time
 import subprocess
 import re
 import threading
+import os
 from ultralytics import YOLO
 
 # CONFIGURATION
@@ -14,28 +15,56 @@ MODEL_PATH = "/home/ambatron/DRONE/Krti_model.pt" # Menggunakan .pt dulu
 CONFIDENCE_THRESHOLD = 0.25
 
 # GStreamer Pipeline
-FRONT_CAM_GST = 'udpsrc port=5600 ! application/x-rtp, payload=96 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! appsink sync=false drop=true max-buffers=1'
-DOWN_CAM_GST = 'udpsrc port=5601 ! application/x-rtp, payload=96 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! appsink sync=false drop=true max-buffers=1'
+FRONT_CAM_GST = 'udpsrc port=5600 timeout=5000000000 ! application/x-rtp, payload=96 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! appsink sync=false drop=true max-buffers=1'
+DOWN_CAM_GST  = 'udpsrc port=5601 timeout=5000000000 ! application/x-rtp, payload=96 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! appsink sync=false drop=true max-buffers=1'
 
 # UDP CONFIG
 UDP_IP = "127.0.0.1"
 UDP_PORT = 5005
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+def open_camera_with_timeout(pipeline, timeout_sec=10):
+    """Buka kamera di thread terpisah dengan timeout - anti-blocking!"""
+    result = [None]
+    def _open():
+        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        result[0] = cap
+    t = threading.Thread(target=_open, daemon=True)
+    t.start()
+    t.join(timeout=timeout_sec)
+    if t.is_alive():
+        print(f"[VISION] ⏰ Camera timeout setelah {timeout_sec}s! Stream belum ada.")
+        return None
+    return result[0]
+
 def start_vision_daemon():
-    print(f"[VISION] Memulai MATS-15 Vision Daemon (DUAL CAMERA MODE)...")
-    
-    print(f"[VISION] Loading model: {MODEL_PATH}")
+    print(f"[VISION] Mengaktifkan GStreamer di Gazebo Harmonic...")
+    os.system("gz topic -t /camera/front/image/enable_streaming -m gz.msgs.Boolean -p 'data: true' &")
+    os.system("gz topic -t /camera/downward/image/enable_streaming -m gz.msgs.Boolean -p 'data: true' &")
+
+    print(f"[VISION] Loading model: {MODEL_PATH} (CPU Mode - Skip CUDA)")
     model = YOLO(MODEL_PATH)
-    
-    cap_front = cv2.VideoCapture(FRONT_CAM_GST, cv2.CAP_GSTREAMER)
-    cap_down = cv2.VideoCapture(DOWN_CAM_GST, cv2.CAP_GSTREAMER)
-    
-    if not cap_front.isOpened() or not cap_down.isOpened():
-        print("[VISION] ERROR: Kamera Gazebo tidak terdeteksi!")
+    model.to('cpu')  # Force CPU, skip CUDA drama!
+
+    # Tunggu Gazebo stream siap
+    time.sleep(3)
+
+    print("[VISION] Membuka kamera front (port 5600)... max 10 detik")
+    cap_front = open_camera_with_timeout(FRONT_CAM_GST, timeout_sec=10)
+
+    print("[VISION] Membuka kamera down (port 5601)... max 10 detik")
+    cap_down = open_camera_with_timeout(DOWN_CAM_GST, timeout_sec=10)
+
+    if cap_front is None or not cap_front.isOpened():
+        print("[VISION] FATAL: Kamera FRONT gagal! Pastiin ArduPilot + Gazebo udah jalan.")
         return
 
-    print(f"[VISION] Mata terbuka. Mengirim data ke {UDP_IP}:{UDP_PORT}...")
+    if cap_down is None or not cap_down.isOpened():
+        print("[VISION] WARNING: Kamera DOWN gagal! Lanjut front-only mode.")
+        cap_down = None
+
+    print(f"[VISION] ✅ Mata terbuka! Mengirim data ke {UDP_IP}:{UDP_PORT}...")
+
 
     use_front = True # Toggle untuk alternating frames
 
@@ -115,9 +144,11 @@ def start_vision_daemon():
                 
             if target_data["status"] == "LOCKED":
                 print(f"[DEBUG VISION] [{cam_name.upper()}] YOLO ngeliat: {target_data['class']} | X={target_data['error_x']}")
-                
+                            
             message = json.dumps(target_data).encode('utf-8')
             sock.sendto(message, (UDP_IP, UDP_PORT))
+
+            time.sleep(0.05) # Loop stabil di ~20 FPS
 
     except KeyboardInterrupt:
         print("\n[VISION] Daemon dihentikan.")

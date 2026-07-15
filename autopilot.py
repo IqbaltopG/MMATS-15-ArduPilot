@@ -1,46 +1,41 @@
 import asyncio
 import json
 import math
+from pymavlink import mavutil
 from utils import clamp, calculate_distance, get_stutter_creep_speed
-from mavsdk import System
 import flight
-from flight import get_distance_sensor_stream
-from comms import state, telemetry_task, attitude_task, start_udp_server
-
-async def kill_switch_task(drone):
-    from mavsdk.telemetry import FlightMode
-    is_offboard = False
-    async for flight_mode in drone.telemetry.flight_mode():
-        if flight_mode == FlightMode.OFFBOARD:
-            is_offboard = True
-        elif is_offboard and flight_mode != FlightMode.OFFBOARD:
-            print("[KILL SWITCH] MANUAL OVERRIDE DETECTED! (Flight Mode changed from OFFBOARD). Exiting Autopilot...")
-            import os
-            os._exit(0)
+from comms import state, mavlink_router_task, start_udp_server
 
 async def run_mission():
-    drone = System()
-    print("[AUTOPILOT] Menyambung ke Drone (SITL)...")
-    await drone.connect(system_address="udp://:14540")
+    print("[AUTOPILOT] Menyambungkan ke ArduPilot via PyMavlink...")
+    # Pakai udp out dari MAVProxy (14550). 
+    # Penting: source_system=254 biar nggak disangka MAVProxy (255) dan bikin bentrok ID!
+    master = mavutil.mavlink_connection('udp:127.0.0.1:14550', source_system=254)
+    master.wait_heartbeat()
+    print("[AUTOPILOT] Terhubung!")
 
-    async for conn_state in drone.core.connection_state():
-        if conn_state.is_connected:
-            print("[AUTOPILOT] Drone Terkoneksi!")
-            break
+    # Jalankan task telemetry di background
+    asyncio.create_task(mavlink_router_task(master))
+    asyncio.create_task(start_udp_server())
     
-    print("[AUTOPILOT] Starting Telemetry Task...")
-    asyncio.create_task(telemetry_task(drone))
-    asyncio.create_task(attitude_task(drone))
-    print("[AUTOPILOT] Starting Kill Switch Task (Flight Mode Listener)...")
-    asyncio.create_task(kill_switch_task(drone))
+    # 1. Tunggu Pilot Takeoff Manual dan Pindah ke GUIDED (Bypass semua keribetan Auto-Takeoff)
+    await flight.wait_for_guided_mode(master)
+    
+    # 2. Enable position + attitude telemetry stream
+    
+    # Enable position telemetry stream
+    master.mav.request_data_stream_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_DATA_STREAM_POSITION, 10, 1
+    )
+    master.mav.request_data_stream_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 10, 1 # Attitude
+    )
 
-    print("[AUTOPILOT] Memulai Smart Takeoff...")
-    await flight.arm_and_takeoff(drone, altitude_m=1.5)
-
-    print("[AUTOPILOT] Hovering di 1.5m selama 5 detik untuk Stabilisasi...")
-    await flight.send_body_velocity(drone, 0.0, 0.0, 0.0, 0.0)
-    await asyncio.sleep(5)
-
+    print("[AUTOPILOT] AI Aktif! Hovering 3 detik untuk stabilisasi sebelum misi dimulai...")
+    await flight.send_body_velocity(master, 0.0, 0.0, 0.0, 0.0)
+    await asyncio.sleep(3)
 
     from states import STATE_REGISTRY, MissionContext
 
@@ -50,7 +45,7 @@ async def run_mission():
     while True:
         current_state = STATE_REGISTRY.get(ctx.state_phase)
         if current_state:
-            await current_state.execute(drone, ctx)
+            await current_state.execute(master, ctx)
             if ctx.state_phase == 'DONE':
                 break
         else:
